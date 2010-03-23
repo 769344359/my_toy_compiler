@@ -11,14 +11,14 @@ static const StructType *StringType;
 static const PointerType *ObjectType_p;
 static const PointerType *StringType_p;
 
-static const PointerType *GenericPointerType = PointerType::get(IntegerType::get(8), 0);
+static const PointerType *GenericPointerType = Type::getInt8PtrTy(getGlobalContext(), 0); // PointerType::get(Type::getVoidTy(getGlobalContext()), 0);
 
 object (*objalloc)() = NULL;
 
-const StructType* CodeGenContext::addStructType(char *name, size_t numArgs, ...)
+const StructType* CodeGenContext::addStructType(std::string name, size_t numArgs, ...)
 {
 	std::vector<const Type*> fields;
-	PATypeHolder fwdType = OpaqueType::get();
+	PATypeHolder fwdType = OpaqueType::get(getGlobalContext());
 	fields.push_back(PointerType::get(fwdType, 0));
 	fields.push_back(GenericPointerType);
 
@@ -29,7 +29,7 @@ const StructType* CodeGenContext::addStructType(char *name, size_t numArgs, ...)
 	}
 	va_end(list);
 
-	StructType *stype = StructType::get(fields, false);
+	StructType *stype = StructType::get(getGlobalContext(), fields, false);
 	cast<OpaqueType>(fwdType.get())->refineAbstractTypeTo(stype);
 	module->addTypeName(name, stype);
 	return cast<StructType>(fwdType.get());
@@ -59,7 +59,7 @@ Function* CodeGenContext::addFunction(char *name, FunctionType *fType, void (^bl
 {
 	Function *f = Function::Create(fType, GlobalValue::InternalLinkage, name, module);
 	f->setCallingConv(CallingConv::C);
-	if (block) block(BasicBlock::Create("entry", f, 0));
+	if (block) block(BasicBlock::Create(getGlobalContext(), "entry", f, 0));
 	return f;
 }
 
@@ -70,34 +70,39 @@ void CodeGenContext::generateCode(NBlock& root)
 	
 	ObjectType = addStructType("object", 1, GenericPointerType);
 	ObjectType_p = PointerType::get(ObjectType, 0);
-	StringType = addStructType("string", 3, GenericPointerType, GenericPointerType, Type::Int64Ty);
+	StringType = addStructType("string", 3, GenericPointerType, GenericPointerType, Type::getInt64Ty(getGlobalContext()));
 	StringType_p = PointerType::get(ObjectType, 0);
 	
 	/* Create objalloc function */
 	objallocFunction = addFunction("objalloc", functionType(ObjectType_p, false, 0), ^(BasicBlock *blk) {
-		ReturnInst::Create(new MallocInst(ObjectType, "", blk), blk);
+    ConstantInt *val_mem = ConstantInt::get(getGlobalContext(), APInt(32, 1));
+    const Type* IntPtrTy = IntegerType::getInt32Ty(getGlobalContext());
+    Constant* allocsize = ConstantExpr::getSizeOf(ObjectType);
+    allocsize = ConstantExpr::getTruncOrBitCast(allocsize, ObjectType);
+		ReturnInst::Create(getGlobalContext(), CallInst::CreateMalloc(blk, IntPtrTy, ObjectType, allocsize, val_mem, 
+              NULL, "obj"), blk);
 	});
 	
 	/* Create refs to putSlot, getSlot and newobj */
 	putSlotFunction = addExternalFunction("putSlot", 
-		functionType(Type::VoidTy, false, 3, ObjectType_p, GenericPointerType, ObjectType_p));
+		functionType(Type::getVoidTy(getGlobalContext()), false, 3, ObjectType_p, GenericPointerType, ObjectType_p));
 	getSlotFunction = addExternalFunction("getSlot", 
-		functionType(ObjectType_p, false, 3, ObjectType_p, GenericPointerType, Type::Int32Ty));
+		functionType(ObjectType_p, false, 3, ObjectType_p, GenericPointerType, Type::getInt32Ty(getGlobalContext())));
 	newobjFunction = addExternalFunction("newobj", 
 		functionType(ObjectType_p, false, 1, ObjectType_p));
 	
 	/* Create the top level interpreter function to call as entry */
 	vector<const Type*> argTypes;
-	FunctionType *ftype = FunctionType::get(Type::VoidTy, argTypes, false);
+	FunctionType *ftype = FunctionType::get(Type::getVoidTy(getGlobalContext()), argTypes, false);
 	mainFunction = Function::Create(ftype, GlobalValue::InternalLinkage, "main", module);
-	BasicBlock *bblock = BasicBlock::Create("entry", mainFunction, 0);
+	BasicBlock *bblock = BasicBlock::Create(getGlobalContext(), "entry", mainFunction, 0);
 	
 	/* Push a new variable/block context */
 	pushBlock(bblock);
 	cObject = new GlobalVariable(ObjectType, true, 
 		GlobalValue::InternalLinkage, 0, "class.Object", module);
 	root.codeGen(*this); /* emit bytecode for the toplevel block */
-	ReturnInst::Create(bblock);
+	ReturnInst::Create(getGlobalContext(), bblock);
 	popBlock();
 	
 	/* Print the bytecode in a human-readable format 
@@ -112,8 +117,8 @@ void CodeGenContext::generateCode(NBlock& root)
 /* Executes the AST by running the main function */
 GenericValue CodeGenContext::runCode() {
 	std::cout << "Running code...\n";
-	ExistingModuleProvider *mp = new ExistingModuleProvider(module);
-	ExecutionEngine *ee = ExecutionEngine::create(mp, false);
+	//ExistingModuleProvider *mp = new ExistingModuleProvider(module);
+	ExecutionEngine *ee = ExecutionEngine::create(module, false);
 	objalloc = (object (*)())ee->getPointerToFunction(objallocFunction);
 	vector<GenericValue> noargs;
 	GenericValue v = ee->runFunction(mainFunction, noargs);
@@ -125,26 +130,26 @@ GenericValue CodeGenContext::runCode() {
 static const Type *typeOf(const NIdentifier& type) 
 {
 	if (type.name.compare("int") == 0) {
-		return Type::Int64Ty;
+		return Type::getInt64Ty(getGlobalContext());
 	}
 	else if (type.name.compare("double") == 0) {
-		return Type::FP128Ty;
+		return Type::getFP128Ty(getGlobalContext());
 	}
 	else if (type.name.compare("object") == 0) {
 		return ObjectType_p;
 	}
-	return Type::VoidTy;
+	return Type::getVoidTy(getGlobalContext());
 }
 
 static Value* getStringConstant(const string& str, CodeGenContext& context)
 {
-	Constant *n = ConstantArray::get(str.c_str(), true);
+	Constant *n = ConstantArray::get(getGlobalContext(), str.c_str(), true);
 	GlobalVariable *g = new GlobalVariable(n->getType(), true, 
 		GlobalValue::InternalLinkage, 0, str.c_str(), context.module);
 	g->setInitializer(n);
 	std::vector<Constant*> ptr;
-	ptr.push_back(ConstantInt::get(Type::Int32Ty, 0));
-	ptr.push_back(ConstantInt::get(Type::Int32Ty, 0));
+	ptr.push_back(ConstantInt::get(Type::getInt32Ty(getGlobalContext()), 0));
+	ptr.push_back(ConstantInt::get(Type::getInt32Ty(getGlobalContext()), 0));
 	return ConstantExpr::getGetElementPtr(g, &ptr[0], ptr.size());
 }
 
@@ -162,7 +167,7 @@ static Value* resolveReference(NReference& ref, CodeGenContext& context, bool ig
 		std::vector<Value*> params;
 		params.push_back(curValue);
 		params.push_back(ch);
-		params.push_back(ConstantInt::get(Type::Int32Ty, 1));
+		params.push_back(ConstantInt::get(Type::getInt32Ty(getGlobalContext()), 1));
 		std::cout << "About to call " << typeid(curValue).name() << " :: " << typeid(ch).name() << std::endl;
 		CallInst *call = CallInst::Create(context.getSlotFunction, 
 			params.begin(), params.end(), "", context.currentBlock());
@@ -177,13 +182,13 @@ static Value* resolveReference(NReference& ref, CodeGenContext& context, bool ig
 Value* NInteger::codeGen(CodeGenContext& context)
 {
 	std::cout << "Creating integer: " << value << endl;
-	return ConstantInt::get(Type::Int64Ty, value, true);
+	return ConstantInt::get(Type::getInt64Ty(getGlobalContext()), value, true);
 }
 
 Value* NDouble::codeGen(CodeGenContext& context)
 {
 	std::cout << "Creating double: " << value << endl;
-	return ConstantFP::get(Type::FP128Ty, value);
+	return ConstantFP::get(Type::getFP128Ty(getGlobalContext()), value);
 }
 
 Value* NIdentifier::codeGen(CodeGenContext& context)
@@ -322,7 +327,7 @@ Value* NFunctionDeclaration::codeGen(CodeGenContext& context)
 	}
 	FunctionType *ftype = FunctionType::get(typeOf(type), argTypes, false);
 	Function *function = Function::Create(ftype, GlobalValue::InternalLinkage, id.name.c_str(), context.module);
-	BasicBlock *bblock = BasicBlock::Create("entry", function, 0);
+	BasicBlock *bblock = BasicBlock::Create(getGlobalContext(), "entry", function, 0);
 
 	context.pushBlock(bblock);
 
@@ -331,9 +336,10 @@ Value* NFunctionDeclaration::codeGen(CodeGenContext& context)
 	}
 	
 	block.codeGen(context);
-	ReturnInst::Create(bblock);
+	ReturnInst::Create(getGlobalContext(), bblock);
 
 	context.popBlock();
 	std::cout << "Creating function: " << id.name << endl;
 	return function;
 }
+

@@ -7,7 +7,7 @@
 #include <llvm/Analysis/Verifier.h>
 #include <llvm/Assembly/PrintModulePass.h>
 #include <llvm/Support/IRBuilder.h>
-#include <llvm/ModuleProvider.h>
+#include <llvm/LLVMContext.h>
 #include <llvm/ExecutionEngine/GenericValue.h>
 #include <llvm/ExecutionEngine/JIT.h>
 #include <llvm/Support/raw_ostream.h>
@@ -33,9 +33,9 @@ public:
 	Function *putSlotFunction;
 	Function *getSlotFunction;
 	Function *newobjFunction;
-    CodeGenContext() { module = new Module("main"); }
+    CodeGenContext() { module = new Module("main", getGlobalContext()); }
     
-	const StructType* addStructType(char *name, size_t numArgs, ...);
+	const StructType* addStructType(std::string name, size_t numArgs, ...);
 	FunctionType* functionType(const Type* retType, bool varargs, size_t numArgs, ...);
 	Function* addExternalFunction(char *name, FunctionType *ftype);
 	Function *addFunction(char *name, FunctionType *ftype, void (^block)(BasicBlock *));
